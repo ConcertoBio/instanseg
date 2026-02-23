@@ -1,6 +1,9 @@
 """
 Run instanseg inference for droplet segmentation
 
+before running, run:
+`aws s3 sync s3://sonata-resources/sonata_ml/training/instanseg/instanseg/torchscripts/ /home/ec2-user/instanseg_models/torchscripts/`
+
 Steps to run:
 1) copy the job id of a sonata job that you want re-run droplet inference on.
 2) run `python eval_droplets_2c.py -j ####` and optionally see the flags for specifying the
@@ -27,18 +30,12 @@ from tabs.pipeline import steps
 from instanseg import InstanSeg
 
 
-def run(
-    job_id: int,
-    env: CONDUCTOR_ENV,
-    model_path: str,
-):
+def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     """
     Run the instanseg model on the dyes/brightfield image for the given taxonomic metadata.
     """
     md = JobMetadata(
-        job_id=job_id,
-        env=env,
-        taxonomic_metadata=TaxonomicMetadata.from_job_id(job_id, env),
+        job_id=job_id, env=env, taxonomic_metadata=TaxonomicMetadata.from_job_id(job_id, env)
     )
     mtg_sat_lims = md.load_asset(Assets.MTG_SAT_LIMS)
     chip = md.load_asset(Assets.REGISTERED_CHIP)
@@ -46,17 +43,14 @@ def run(
         full_mtg = np.asarray(chip.render())
 
     summed_dyes = steps.sum_dyes(
-        jmd=md,
-        full_montage=full_mtg,
-        montage_saturation_limits=mtg_sat_lims,
+        jmd=md, full_montage=full_mtg, montage_saturation_limits=mtg_sat_lims
     )
     stacked = np.asarray(
         np.stack(
             [
                 summed_dyes,
                 transformations.rescale_in_blocks(
-                    np.asarray(full_mtg[-1]),
-                    *mtg_sat_lims[chip.brightfield_channel],
+                    np.asarray(full_mtg[-1]), *mtg_sat_lims[chip.brightfield_channel]
                 ),
             ],
             axis=0,
@@ -87,26 +81,16 @@ def run(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--job_id', '-j', type=int, required=True)
-    parser.add_argument(
-        '--env',
-        '-e',
-        type=str,
-        required=False,
-        default='prod',
-    )
+    parser.add_argument('--env', '-e', type=str, required=False, default='prod')
     parser.add_argument(
         '--model_path',
         '-m',
         type=str,
         required=False,
         default=(
-            '/home/ec2-user/code/instanseg/instanseg/torchscripts/'
+            '/home/ec2-user/instanseg_models/torchscripts/'
             '256px square premerge and post merge 2c 50 epochs.pt'
         ),
     )
     args = parser.parse_args()
-    run(
-        args.job_id,
-        args.env,
-        args.model_path,
-    )
+    run(args.job_id, args.env, args.model_path)
