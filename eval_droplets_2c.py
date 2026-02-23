@@ -74,13 +74,16 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
             axis=0,
         )
     )
+    del full_mtg
+    del summed_dyes
+    del bf_norm
     print(f'{stacked.shape=}')
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object)
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
         tile_size=512,
-        batch_size=16,
+        batch_size=8,
         target='nuclei',
         return_image_tensor=False,
     )
