@@ -130,6 +130,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         batch_size=8,
         target='nuclei',
         return_image_tensor=False,
+        normalise=False,
     )
     log_mem('after eval_medium_image')
     instances = np.squeeze(np.asarray(instances))
