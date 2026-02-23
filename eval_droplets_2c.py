@@ -87,7 +87,13 @@ def run(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--job_id', '-j', type=int, required=True)
-    parser.add_argument('--env', '-e', type=str, required=True, default='prod')
+    parser.add_argument(
+        '--env',
+        '-e',
+        type=str,
+        required=False,
+        default='prod',
+    )
     parser.add_argument(
         '--model_path',
         '-m',
