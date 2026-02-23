@@ -24,8 +24,10 @@ from dask.array import core as dask_core
 from dask.diagnostics.progress import ProgressBar
 from tabs import CONDUCTOR_ENV
 from tabs.img_utils import transformations
+from tabs.io import file_io
 from tabs.metadata import Assets, JobMetadata, TaxonomicMetadata
 from tabs.pipeline import steps
+from tabs.visualize import chip_contents
 
 from instanseg import InstanSeg
 
@@ -39,28 +41,45 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     )
     mtg_sat_lims = md.load_asset(Assets.MTG_SAT_LIMS)
     chip = md.load_asset(Assets.REGISTERED_CHIP)
+
+    fp = chip_contents.level_filepath(md.tmd, level=0)
+    if file_io.check_if_file_exists(fp):
+        full_mtg_darr = dask_core.from_zarr(fp)
+        normalize = False
+    else:
+        full_mtg_darr = chip.render()
+        normalize = True
+
     with ProgressBar():
-        full_mtg = np.asarray(chip.render())
+        full_mtg = np.asarray(full_mtg_darr)
 
     summed_dyes = steps.sum_dyes(
-        jmd=md, full_montage=full_mtg, montage_saturation_limits=mtg_sat_lims
+        jmd=md,
+        full_montage=full_mtg,
+        montage_saturation_limits=mtg_sat_lims,
+    )
+    bf_norm = (
+        transformations.rescale_in_blocks(
+            np.asarray(full_mtg[-1]), *mtg_sat_lims[chip.brightfield_channel]
+        )
+        if normalize
+        else full_mtg[-1]
     )
     stacked = np.asarray(
         np.stack(
             [
                 summed_dyes,
-                transformations.rescale_in_blocks(
-                    np.asarray(full_mtg[-1]), *mtg_sat_lims[chip.brightfield_channel]
-                ),
+                bf_norm,
             ],
             axis=0,
         )
     )
+    print(f'{stacked.shape=}')
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object)
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
-        tile_size=1024,
+        tile_size=512,
         batch_size=16,
         target='nuclei',
         return_image_tensor=False,
