@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path, PosixPath
 from typing import List, Optional, Tuple, Union
 
@@ -9,6 +10,42 @@ from torch import nn
 from torch.nn.functional import interpolate
 from pathlib import Path, PosixPath
 from instanseg.utils.pytorch_utils import _to_tensor_float32
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
+
+def _log_mem(tag: str) -> None:
+    rss_gb = None
+    if psutil is not None:
+        try:
+            proc = psutil.Process(os.getpid())
+            rss_gb = proc.memory_info().rss / (1024**3)
+        except Exception:
+            rss_gb = None
+    if rss_gb is None:
+        try:
+            import resource
+
+            rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024**2)
+        except Exception:
+            rss_gb = None
+    if torch.cuda.is_available():
+        try:
+            cuda_gb = torch.cuda.memory_allocated() / (1024**3)
+        except Exception:
+            cuda_gb = None
+    else:
+        cuda_gb = None
+    rss_text = f'{rss_gb:.2f}GB' if rss_gb is not None else 'n/a'
+    cuda_text = f'{cuda_gb:.2f}GB' if cuda_gb is not None else 'n/a'
+    print(
+        f'[{time.strftime("%H:%M:%S")}] {tag} RSS={rss_text} CUDA={cuda_text}',
+        flush=True,
+    )
+
 
 pixel_size_precision = 0.01
 
@@ -564,8 +601,11 @@ class InstanSeg:
 
         from instanseg.utils.utils import _filter_kwargs, percentile_normalize
 
+        _log_mem('eval_medium_image start')
         image = _to_tensor_float32(image)
+        _log_mem('after to_tensor_float32')
         image = _to_ndim(image, 4)
+        _log_mem('after to_ndim_4')
 
         if 'channel_ids' in kwargs:
             assert max(kwargs['channel_ids']) <= image.shape[1], (
@@ -591,9 +631,11 @@ class InstanSeg:
                 img_has_been_rescaled = False
 
         image = _to_ndim(image, 3)
+        _log_mem('after to_ndim_3')
 
         if normalise:
             image = percentile_normalize(image, subsampling_factor=normalisation_subsampling_factor)
+            _log_mem('after percentile_normalize')
 
         output_dimension = 2 if self.instanseg.cells_and_nuclei else 1
 
@@ -612,6 +654,7 @@ class InstanSeg:
         instanseg_kwargs = _filter_kwargs(self.instanseg, kwargs)
         instanseg_kwargs['target_segmentation'] = target_segmentation
 
+        _log_mem('before sliding_window_inference')
         instances = _sliding_window_inference(
             image,
             self.instanseg,
@@ -623,6 +666,7 @@ class InstanSeg:
             show_progress=self.verbose,
             instanseg_kwargs=instanseg_kwargs,
         ).float()
+        _log_mem('after sliding_window_inference')
 
         instances = _to_ndim(instances, 4)
         image = _to_ndim(image, 4)
@@ -1135,4 +1179,3 @@ def _display_colourized(mIF, normalise=True):
     colour_render = torch.clamp_(colour_render, 0, 1)
     colour_render = _move_channel_axis(colour_render, to_back=True).detach().numpy() * 255
     return colour_render.astype(np.uint8)
-
