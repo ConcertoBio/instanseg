@@ -114,25 +114,21 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
                 bf_norm,
             ],
             axis=0,
-        ).astype(np.float32, copy=False)
+        )
     )
     del full_mtg
     del summed_dyes
     del bf_norm
     log_mem('after stacked')
     print(f'{stacked.shape=}')
-    stacked_tensor = torch.from_numpy(stacked).float()
-    del stacked
-    log_mem('after stacked_tensor')
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object)
     log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
-        image=stacked_tensor,  # type: ignore
+        image=stacked,  # type: ignore
         tile_size=512,
         batch_size=8,
         target='nuclei',
-        normalise=False,
         return_image_tensor=False,
     )
     log_mem('after eval_medium_image')
