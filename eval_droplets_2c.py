@@ -17,6 +17,8 @@ Steps to run:
 """
 
 import argparse
+import os
+import time
 
 import numpy as np
 import torch
@@ -30,6 +32,42 @@ from tabs.pipeline import steps
 from tabs.visualize import chip_contents
 
 from instanseg import InstanSeg
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
+
+def log_mem(tag: str) -> None:
+    rss_gb = None
+    if psutil is not None:
+        try:
+            proc = psutil.Process(os.getpid())
+            rss_gb = proc.memory_info().rss / (1024**3)
+        except Exception:
+            rss_gb = None
+    if rss_gb is None:
+        try:
+            import resource
+
+            # On Linux, ru_maxrss is in KB.
+            rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024**2)
+        except Exception:
+            rss_gb = None
+    if torch.cuda.is_available():
+        try:
+            cuda_gb = torch.cuda.memory_allocated() / (1024**3)
+        except Exception:
+            cuda_gb = None
+    else:
+        cuda_gb = None
+    rss_text = f'{rss_gb:.2f}GB' if rss_gb is not None else 'n/a'
+    cuda_text = f'{cuda_gb:.2f}GB' if cuda_gb is not None else 'n/a'
+    print(
+        f'[{time.strftime("%H:%M:%S")}] {tag} RSS={rss_text} CUDA={cuda_text}',
+        flush=True,
+    )
 
 
 def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
@@ -50,14 +88,17 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         full_mtg_darr = chip.render()
         normalize = True
 
+    log_mem('start')
     with ProgressBar():
         full_mtg = np.asarray(full_mtg_darr)
+    log_mem('after full_mtg')
 
     summed_dyes = steps.sum_dyes(
         jmd=md,
         full_montage=full_mtg,
         montage_saturation_limits=mtg_sat_lims,
     )
+    log_mem('after summed_dyes')
     bf_norm = (
         transformations.rescale_in_blocks(
             np.asarray(full_mtg[-1]), *mtg_sat_lims[chip.brightfield_channel]
@@ -65,6 +106,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         if normalize
         else full_mtg[-1]
     )
+    log_mem('after bf_norm')
     stacked = np.asarray(
         np.stack(
             [
@@ -77,9 +119,11 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     del full_mtg
     del summed_dyes
     del bf_norm
+    log_mem('after stacked')
     print(f'{stacked.shape=}')
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object)
+    log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
         tile_size=512,
@@ -87,7 +131,9 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         target='nuclei',
         return_image_tensor=False,
     )
+    log_mem('after eval_medium_image')
     instances = np.squeeze(np.asarray(instances))
+    log_mem('after instances squeeze')
     save_path = md.tmd.build_arranger_asset_filepath(
         asset_suffix='99_instanseg_nuclei_predictions.zarr'
     )
