@@ -32,6 +32,9 @@ dependencies = [
 [project.scripts]
 inference = "instanseg.scripts.inference:main"
 
+[tool.uv.sources]
+tabs = { git = "ssh://git@github.com/ConcertoBio/tabs", rev = "main" }
+
 [project.optional-dependencies]
 # Additional I/O backends and GeoJSON export
 io = [
