@@ -27,6 +27,7 @@ dependencies = [
     "tqdm>=4.65.0",
     "scikit-image>=0.21.0",
     "requests>=2.0.0",
+    "tabs[data]",
 ]
 
 [project.scripts]
