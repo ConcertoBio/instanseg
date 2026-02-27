@@ -126,7 +126,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
-        tile_size=800,
+        tile_size=600,
         batch_size=16,
         target='nuclei',
         return_image_tensor=False,

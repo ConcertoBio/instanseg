@@ -714,21 +714,11 @@ class InstanSeg:
         :return: Returns a zarr file with the segmentation. The zarr file is saved in the same directory as the image with the same name but with the extension .zarr.
         """
 
-            import zarr
-            from itertools import product
-            from instanseg.utils.pytorch_utils import torch_fastremap, match_labels
-            from pathlib import Path
-            from tqdm import tqdm
-            from instanseg.utils.tiling import _chops, _remove_edge_labels, _zarr_to_json_export
-    
-            instanseg = self.instanseg
-
+        import zarr
         from itertools import product
+        from instanseg.utils.pytorch_utils import torch_fastremap, match_labels
         from pathlib import Path
-
         from tqdm import tqdm
-
-        from instanseg.utils.pytorch_utils import match_labels, torch_fastremap
         from instanseg.utils.tiling import _chops, _remove_edge_labels, _zarr_to_json_export
 
         instanseg = self.instanseg
