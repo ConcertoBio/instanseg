@@ -112,13 +112,16 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     log_mem('after bf_norm')
     downsampling = 2 if md.run_magnification == 4 else 1
     mtg_yx_shape = bf_norm.shape
-    stacked = np.stack(
-        [
-            summed_dyes[::downsampling, ::downsampling],
-            bf_norm[::downsampling, ::downsampling],
-        ],
-        axis=0,
-    ).astype(np.float32, copy=False)
+    stacked = np.asarray(
+        np.stack(
+            [
+                summed_dyes[::downsampling, ::downsampling],
+                bf_norm[::downsampling, ::downsampling],
+            ],
+            axis=0,
+        ),
+        dtype=np.float32,
+    )
     del full_mtg
     del summed_dyes
     del bf_norm
@@ -135,7 +138,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     log_mem('after gc before eval_medium_image')
     log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
-        image=stacked,  # type: ignore
+        image=torch.from_numpy(stacked),
         tile_size=600,
         batch_size=16,
         target='nuclei',
