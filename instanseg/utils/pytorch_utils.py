@@ -10,9 +10,44 @@ def remap_values(remapping: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     remapping: 2,N      Make sure the remapping is 1 to 1, and there are no loops (i.e. 1->2, 2->3, 3->1). Loops can be removed using graph based connected components algorithms (see instanseg postprocessing for an example)
     x: any shape
     """
+
     sorted_remapping = remapping[:, remapping[0].argsort()]
     index = torch.bucketize(x.ravel(), sorted_remapping[0])
     return sorted_remapping[1][index].reshape(x.shape)
+
+@torch.no_grad()
+def remap_values_safe(remapping: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """
+    Remap values in `x` according to pairs in `remapping` (shape: [2, N]).
+    Any value in `x` that is not present in remapping[0] is mapped to 0.
+    """
+    assert remapping.ndim == 2 and remapping.shape[0] == 2, "remapping must be [2, N]"
+
+    device = x.device
+    keys = remapping[0].to(device=device, dtype=torch.long)
+    vals = remapping[1].to(device=device, dtype=torch.long)
+
+    if keys.numel() == 0:
+        return torch.zeros_like(x, dtype=torch.long)
+
+    # sort by key
+    keys, order = torch.sort(keys)
+    vals = vals[order]
+
+    flat = x.to(torch.long, copy=False).reshape(-1)
+
+    # search positions where each x would be inserted
+    pos = torch.searchsorted(keys, flat)                
+    K = keys.numel()
+    pos_safe = pos.clamp_max(K - 1)                      
+
+    # exact-match mask 
+    is_match = (pos < K) & (keys[pos_safe] == flat)
+
+    out = torch.zeros_like(flat)
+    out[is_match] = vals[pos_safe[is_match]]
+
+    return out.view_as(x)
 
 
 # def torch_fastremap(x: torch.Tensor) -> torch.Tensor:
@@ -29,18 +64,83 @@ def remap_values(remapping: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 def torch_fastremap(x: torch.Tensor) -> torch.Tensor:
     if x.max() == 0:
         return x
+    if x.min() > 0:
+        add_one = 1
+    else:
+        add_one = 0
     unique_values = torch.unique(x, sorted=True)
     new_values = torch.arange(len(unique_values), dtype=x.dtype, device=x.device)
     remapping = torch.stack((unique_values, new_values))
-    return remap_values(remapping, x)
+    return remap_values(remapping, x) + add_one
 
+import torch
+
+@torch.no_grad()
+def calc_tiles_map(org_tile: torch.Tensor, no_edge_tile: torch.Tensor, final_tile: torch.Tensor):
+    def to_2d(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 3:
+            # if multiple channels, take the first plane; if 1, squeeze it
+            return x[0] if x.shape[0] != 1 else x.squeeze(0)
+        return x
+
+    a = to_2d(org_tile).to(torch.int64)
+    b = to_2d(no_edge_tile).to(torch.int64)
+    c = to_2d(final_tile).to(torch.int64)
+
+    device = a.device
+
+    # labels eligible vs kept
+    orig = torch.unique(a, sorted=True)
+    if orig.numel() == 0:
+        return torch.zeros((2, 0), dtype=torch.long, device=device)
+
+    # Unique labels and inverse maps for b and c
+    b_unique, b_inv = torch.unique(b, return_inverse=True)
+    c_unique, c_inv = torch.unique(c, return_inverse=True)
+
+    # contingency counts
+    B = b_unique.numel()
+    C = c_unique.numel()
+
+    if B == 0 or C == 0:
+            return torch.stack((orig, torch.zeros_like(orig)), dim=0)
+
+    # joint histogram
+    lin = b_inv.reshape(-1) * C + c_inv.reshape(-1)
+    counts = torch.zeros(B * C, dtype=torch.long, device=device)
+    if lin.numel() > 0:
+        counts.scatter_add_(0, lin, torch.ones_like(lin, dtype=torch.long))
+    counts = counts.view(B, C)
+
+    # for each b label, pick the most frequent c label
+    max_c_idx = counts.argmax(dim=1)
+    mapped_for_b = c_unique[max_c_idx]
+
+    # Align and safely index
+    b_unique_sorted, sort_idx = torch.sort(b_unique)
+    mapped_for_b = mapped_for_b[sort_idx]
+
+    pos = torch.searchsorted(b_unique_sorted, orig)
+    Bn = b_unique_sorted.numel()
+    if Bn > 0:
+        pos_safe = pos.clamp_max(Bn - 1)
+        in_b = (pos < Bn) & (b_unique_sorted[pos_safe] == orig)
+        mapped_candidates = mapped_for_b[pos_safe]
+    else:
+        in_b = torch.zeros_like(orig, dtype=torch.bool)
+        mapped_candidates = torch.zeros_like(orig)
+
+    mapped = torch.where(in_b, mapped_candidates, torch.zeros_like(orig))
+    mapping = torch.stack((orig, mapped), dim=0)
+    return mapping
 
 
 def torch_onehot(x: torch.Tensor) -> torch.Tensor:
     # x is a labeled image of shape _,_,H,W returns a onehot encoding of shape 1,C,H,W
 
     if x.max() == 0:
-        return torch.zeros_like(x).reshape(1, 0, *x.shape[-2:])
+        # Create empty tensor with 0 channels directly (can't reshape non-empty to empty)
+        return torch.zeros((1, 0, *x.shape[-2:]), dtype=x.dtype, device=x.device)
     H, W = x.shape[-2:]
     x = x.view(-1, 1, H, W)
     x = x.squeeze().view(1, 1, H, W)
@@ -62,6 +162,11 @@ def fast_iou(onehot: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
 def fast_sparse_iou(sparse_onehot: torch.Tensor) -> torch.Tensor:
 
     intersection = torch.sparse.mm(sparse_onehot, sparse_onehot.T).to_dense()
+
+    if torch.isnan(intersection).any() or torch.isinf(intersection).any():
+        print("Warning: Intersection contains NaN or Inf values. This may indicate an issue with the input sparse tensor.")
+    
+
     sparse_sum = torch.sparse.sum(sparse_onehot, dim=(1,))[None].to_dense()
     union = sparse_sum.T + sparse_sum - intersection
     return intersection / union
@@ -78,6 +183,9 @@ def fast_sparse_intersection_over_minimum_area(sparse_onehot: torch.Tensor) -> t
     """
     # Compute intersection
     intersection = torch.sparse.mm(sparse_onehot, sparse_onehot.T).to_dense()
+
+    if torch.isnan(intersection).any() or torch.isinf(intersection).any():
+        print("Warning: Intersection contains NaN or Inf values. This may indicate an issue with the input sparse tensor.")
     
     # Compute the area (sum of ones for each row)
     sparse_sum = torch.sparse.sum(sparse_onehot, dim=(1,)).to_dense()
@@ -293,8 +401,8 @@ def connected_components(x: torch.Tensor, num_iterations: int = 32) -> torch.Ten
 
 def iou_heatmap(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
-    x is H,W
-    y is H,W
+    x is 1,1,H,W
+    y is 1,1,H,W
     This function takes two labeled images and returns the intersection over union heatmap
     """
     if x.max() ==0 or y.max() == 0:
@@ -505,7 +613,7 @@ def _to_tensor_float32(image: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
     if isinstance(image, np.ndarray):      
         if image.dtype == np.uint16:
             image = image.astype(np.int32)
-        image = torch.from_numpy(image).float()
+        image = torch.from_numpy(image.astype(np.float32)).float()
     
     image = image.squeeze()
 

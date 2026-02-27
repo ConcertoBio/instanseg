@@ -4,7 +4,7 @@ import warnings
 
 def _keep_images(item, args):
 
-    args.source_dataset = str(args.source_dataset).lower().replace("[","").replace("]","").replace("'","").split(",")
+    #args.source_dataset = str(args.source_dataset).lower().replace("[","").replace("]","").replace("'","").split(",")
 
     if args.source_dataset != ["all"] and item[
         'parent_dataset'].lower() not in args.source_dataset:  # remove items that are not of the desired dataset
@@ -47,15 +47,22 @@ def _format_labels(item,target_segmentation):
                 labels = np.stack((item["nucleus_masks"], item["cell_masks"]))
             elif "nucleus_masks" in item.keys() and "cell_masks" not in item.keys():
                 labels = item['nucleus_masks']
+                if isinstance(labels, np.ndarray):
+                    labels = labels.astype(np.int32)
+                else:
+                    labels = np.array(labels).astype(np.int32)
                 labels = np.stack((labels, np.zeros_like(labels) - 1))
             elif "nucleus_masks" not in item.keys() and "cell_masks" in item.keys():
                 labels = item['cell_masks']
+                if isinstance(labels, np.ndarray):
+                    labels = labels.astype(np.int32)
+                else:
+                    labels = np.array(labels).astype(np.int32)
                 labels = np.stack((np.zeros_like(labels) - 1, labels))
             else:
                 raise NotImplementedError("No labels found")
     else:
         raise NotImplementedError("Target segmentation not recognized", target_segmentation)
-    
  
     return labels
  
@@ -222,7 +229,7 @@ def _read_images_from_pth(data_path= "../datasets", dataset = "segmentation", da
     for _set in sets:
         print("Datasets available in ", _set)
         unique_values, counts = np.unique([item['parent_dataset'] for item in complete_dataset[_set]], return_counts=True)
-        print(set(zip(unique_values, counts)))
+        print(set((k.item(), v.item()) for k, v in zip(unique_values, counts)))
 
         data_dicts[_set] = []
         images_local = [get_image(item['image']) for item in complete_dataset[_set] if _keep_images(item, args)][:data_slice]
@@ -234,7 +241,7 @@ def _read_images_from_pth(data_path= "../datasets", dataset = "segmentation", da
 
         print("After filtering using:")
         unique_values, counts = np.unique([item['parent_dataset'] for item in data_dicts[_set][2]], return_counts=True)
-        print(set(zip(unique_values, counts)))
+        print(set((k.item(), v.item()) for k, v in zip(unique_values, counts)))
 
     if dummy:
         warnings.warn("Using same train and validation sets !")
@@ -249,7 +256,6 @@ def _read_images_from_pth(data_path= "../datasets", dataset = "segmentation", da
     return return_list
 
 
-
 def get_loaders(train_images_local, train_labels_local, val_images_local, val_labels_local, train_meta, val_meta, args):
     from torch.utils.data.sampler import RandomSampler, WeightedRandomSampler
     from instanseg.utils.augmentation_config import get_augmentation_dict
@@ -262,8 +268,12 @@ def get_loaders(train_images_local, train_labels_local, val_images_local, val_la
         import torch
         torch.manual_seed(args.rng_seed)
 
-    augmentation_dict = get_augmentation_dict(args.dim_in, nuclei_channel=None, amount=args.transform_intensity,
-                                              pixel_size=args.requested_pixel_size, augmentation_type=args.augmentation_type)
+    augmentation_dict = get_augmentation_dict(args.dim_in, 
+                                              nuclei_channel=None, 
+                                              amount=args.transform_intensity,
+                                              pixel_size=args.requested_pixel_size,
+                                              mean_diameter=args.mean_object_diameter, 
+                                              augmentation_type=args.augmentation_type)
 
     train_data = Segmentation_Dataset(train_images_local, 
                                       train_labels_local, 
@@ -298,7 +308,6 @@ def get_loaders(train_images_local, train_labels_local, val_images_local, val_la
                 args.length_of_epoch * 0.2))  # This is relates to the standard 80/20 split
         else:
             train_sampler = RandomSampler(train_data)
-
 
     else:
 

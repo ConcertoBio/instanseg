@@ -9,7 +9,6 @@ import torch.optim as optim
 import argparse
 from pathlib import Path
 import pandas as pd
-import pdb
 
 #torch.autograd.set_detect_anomaly(True) #For debugging cuda errors
 parser = argparse.ArgumentParser()
@@ -21,7 +20,7 @@ parser.add_argument('-source', '--source_dataset', default="all", type=str, help
 parser.add_argument("-m_f", "--model_folder", type=str, default=None, help = "Name of the model to resume training. This must be a folder inside model_path")
 parser.add_argument("-m_p", "--model_path", type=str, default=r"../models", help = "Path to the folder containing the models")
 parser.add_argument("-o_p", "--output_path", type=str, default=r"../models", help = "Path to the folder where the results will be saved")
-parser.add_argument("-e_s", "--experiment_str", type=str, default="my_first_instanSeg", help = "String to identify the experiment")
+parser.add_argument("-e_s", "--experiment_str", type=str, default="my_first_instanseg", help = "String to identify the experiment")
 parser.add_argument("-d", "--device", type=str, default=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
 parser.add_argument('-num_workers', '--num_workers', default=3, type=int, help = "Number of CPU cores to use for data loading")
 parser.add_argument('-ci', '--channel_invariant', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to add a channel invariant model to the pipeline")
@@ -48,12 +47,7 @@ parser.add_argument("-drop", "--dropprob", type=float, default=0., help = "Dropo
 parser.add_argument("-tf", "--transform_intensity", type=float, default=0.5, help = "Intensity transformation factor")
 parser.add_argument("-dim_in", "--dim_in", type=int, default=3,help="Number of channels that the (backbone) model expects. This is also the number of channels a channel invariant model would output.")
 parser.add_argument("-dummy", "--dummy", default=False, type=lambda x: (str(x).lower() == 'true'),help="Use the training set as a validation set, this will trigger a warning message. use only for debugging")
-parser.add_argument('-to_centre', '--to_centre', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to use the instance centroid or the learnt instance centroid in InstanSeg")
 parser.add_argument('-bg_weight', '--bg_weight', default=None, type= float, help = "Weight to assign to the background class in the loss function")
-parser.add_argument('-opl', '--only_positive_labels', default=True, type=lambda x: (str(x).lower() == 'true'), help = "Sample local maxima from the whole image, adds an object classifier")
-parser.add_argument('-multi_centre', '--multi_centre', default=True, type=lambda x: (str(x).lower() == 'true'), help = "Allow multi centres per instance, uses local maxima algorithm")
-parser.add_argument('-open_license', '--open_license', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to filter out images that do not have an open license during training")
-parser.add_argument('-modality', '--image_modality', default="all", type=str, help = "Filter out images that do not have this modality: Brightfield, Fluorescence, all")
 parser.add_argument('-binary_loss_fn', '--binary_loss_fn', default="lovasz_hinge", type=str, help = "Loss function to use for instance segmentation: lovasz_hinge or dice_loss are supported. lovasz_hinge is a lot slower to start converging")
 parser.add_argument('-seed_loss_fn', '--seed_loss_fn', default="l1_distance", type=str, help = "Loss function to use for seed selection, only binary_xloss and l1_distance are supported. Binary_xloss is much faster, but l1_distance is usually more accurate")
 parser.add_argument('-anneal', '--cosineannealing', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to use cosine annealing for the learning rate")
@@ -62,16 +56,20 @@ parser.add_argument('-hotstart', '--hotstart_training', default=10, type=int, he
 parser.add_argument('-window', '--window_size', default=128, type=int, help = "Size of the window containing each instance")
 parser.add_argument('-multihead', '--multihead', default= False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to branch the decoder into multiple heads.")
 parser.add_argument('-dim_coords', '--dim_coords', default=2, type=int, help = "Dimensionality of the coordinate system. Little support for anything but 2")
+parser.add_argument('-dim_seeds', '--dim_seeds', default=1, type=int, help = "Number of seed maps to produce. Little support for anything but 1")
 parser.add_argument('-norm', '--norm', default="BATCH", type=str, help = "Norm layer to use: None, INSTANCE, INSTANCE_INVARIANT, BATCH")
 parser.add_argument('-mlp_w', '--mlp_width', default=5, type=int, help = "Width of the MLP hidden dim")
 parser.add_argument('-augmentation_type', '--augmentation_type', default="minimal", type=str, help = "'minimal' or 'heavy' or 'brightfield_only'")
 parser.add_argument('-adaptor_net', '--adaptor_net_str', default="1", type=str, help = "Adaptor net to use")
 parser.add_argument('-freeze', '--freeze_main_model', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to freeze the main model")
+parser.add_argument('-freeze_sam', '--freeze_sam', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to freeze the SAM weights")
 parser.add_argument('-f_e', '--feature_engineering', default="0", type=str, help = "Feature engineering function to use")
 parser.add_argument("-f","--f", default = None, type = str, help = "ignore, this is for jypyter notebook compatibility")
 parser.add_argument('-rng_seed', '--rng_seed', default=None, type=int, help = "Optional seed for the random number generator")
 parser.add_argument('-use_deterministic', '--use_deterministic', default=False, type=lambda x: (str(x).lower() == 'true'), help = "Whether to use deterministic algorithms (default=False)")
 parser.add_argument('-tile', '--tile_size', default=256, type=int, help = "Tile sizes for the input images")
+parser.add_argument('-diam', '--mean_object_diameter', default=None, type=int, help = "Target diameter of the instances. Only use if pixel size is not available.")
+
 
 def main(model, loss_fn, train_loader, test_loader, num_epochs=1000, epoch_name='output_epoch'):
     from instanseg.utils.AI_utils import optimize_hyperparameters, train_epoch, test_epoch
@@ -129,7 +127,7 @@ def main(model, loss_fn, train_loader, test_loader, num_epochs=1000, epoch_name=
             f1_list.append(f1_score)
             dict_to_print["f1_score"] = f1_score
 
-        if args.cosineannealing:
+        if scheduler is not None:
             dict_to_print["lr:"] = optimizer.param_groups[0]["lr"]
             scheduler.step()
 
@@ -147,7 +145,8 @@ def main(model, loss_fn, train_loader, test_loader, num_epochs=1000, epoch_name=
             }, args.output_path / "model_weights.pth") 
 
 
-        print(str(dict_to_print).replace("{", "").replace("}", "").replace("'", ""))
+        # this is where the loss gets printed
+        print(", ".join(f"{k}: {v:.5g}" for k, v in dict_to_print.items()))
 
     return model, train_losses, test_losses, f1_list, f1_list_cells
 
@@ -201,7 +200,6 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
     args_dict = vars(args)
     num_epochs = args.num_epochs
     n_sigma = args.n_sigma
-    on_cluster = args.on_cluster
     dim_in = args.dim_in
 
     if args.norm == "None":
@@ -223,13 +221,11 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
                         device = device,
                         n_sigma=n_sigma,
                         cells_and_nuclei=args.cells_and_nuclei, 
-                        to_centre = args.to_centre, 
                         window_size = args.window_size, 
-                        dim_coords= args.dim_coords, 
-                        multi_centre= args.multi_centre, 
+                        dim_coords= args.dim_coords,
+                        dim_seeds = args.dim_seeds, 
                         feature_engineering_function=args.feature_engineering,
-                        bg_weight = args.bg_weight,
-                        only_positive_labels= args.only_positive_labels)  # binary_xloss, lovasz_hinge dice_loss general_dice_loss
+                        bg_weight = args.bg_weight)  # binary_xloss, lovasz_hinge dice_loss general_dice_loss
 
         def loss_fn(*args, **kwargs):
             return method.forward(*args, **kwargs)
@@ -250,6 +246,7 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
 
     model = build_model_from_dict(args_dict, random_seed=args.rng_seed)
 
+
     try:
         from fvcore.nn import FlopCountAnalysis
         flops = FlopCountAnalysis(model, torch.randn(1,3,256,256))
@@ -266,6 +263,9 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
             return optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay)
         elif args.optimizer.lower() == "adamw":
             return optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
+        elif args.optimizer.lower() == "adopt":
+            from adopt import ADOPT
+            return ADOPT(parameters, lr=args.lr, weight_decay=args.weight_decay)
         else:
             raise NotImplementedError("Optimizer not recognized", args.optimizer)
 
@@ -305,12 +305,36 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
 
     if args.cosineannealing:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=0.00001)
+    
+    elif args.model_str.lower() == "cellposesam":
+        from torch.optim.lr_scheduler import LambdaLR
+
+        def lr_schedule(epoch, warmup_epochs=10, max_epochs=args.num_epochs):
+            if epoch < warmup_epochs:
+                # Linear warmup from 0 to max_lr
+                return (epoch + 1) / warmup_epochs
+            elif epoch < max_epochs - 150:
+                # Max LR after warmup
+                return 1.0
+            elif epoch < max_epochs - 50:
+                # First decay stage (reduce by factor of 10)
+                return 0.1
+            else:
+                # Second decay stage (reduce by another factor of 10)
+                return 0.01
+
+        # Scheduler with the custom learning rate function
+        scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_schedule(epoch))
+    else:
+        scheduler = None
 
 
     if "[" in args.source_dataset:
-        args.source_dataset = args.source_dataset.replace("[", "").replace("]", "").replace("'", "").split(",")
+ 
+        args.source_dataset = [i.lower() for i in args.source_dataset.replace("[","").replace("]","").replace("'","").split(",")]
+        print(type(args.source_dataset), args.source_dataset)
     else:
-        args.source_dataset = args.source_dataset
+        args.source_dataset = args.source_dataset.lower()
 
 
     train_images, train_labels, train_meta, val_images, val_labels, val_meta = _read_images_from_pth(data_path = args.data_path, 
@@ -344,7 +368,8 @@ def instanseg_training(segmentation_dataset: Dict = None, **kwargs):
     if args.hotstart_training > 0:
         hot_epochs = args.hotstart_training
         print("Hotstart for "+str(hot_epochs)+" epochs with binary_xloss and dice_loss")
-        method.update_seed_loss("binary_xloss")
+        if args.seed_loss_fn != "distance_and_binary_loss":
+            method.update_seed_loss("binary_xloss")
         method.update_binary_loss("dice_loss")
         model, train_losses, test_losses, f1_list, f1_list_cells = main(model, loss_fn, train_loader, test_loader, num_epochs=hot_epochs, epoch_name='hotstart_epoch')
 

@@ -27,7 +27,10 @@ def _edge_mask(labels, ignore=[None]):
 
 
 def _remove_edge_labels(labels, ignore=[None]):
-    return labels * ~_edge_mask(labels, ignore=ignore)
+
+    remove_mask = ~_edge_mask(labels, ignore=ignore)
+
+    return (labels * remove_mask)
 
 
 
@@ -77,23 +80,22 @@ def _tiles_from_chops(image: torch.Tensor, shape: tuple, tuple_index: tuple) -> 
     return tile_list
 
 
-def _stitch(tiles: list, shape: tuple, chop_list: list, final_shape: tuple, offset : int):
+def _stitch(tiles: list, shape: tuple, chop_list: list, final_shape: tuple, offset : int, map_list: torch.Tensor | None = None):
     """This function takes a list of tiles, a shape, and a tuple of window indices (e.g., outputed by the function _chops)
     and returns a stitched image"""
-    from instanseg.utils.pytorch_utils import torch_fastremap, match_labels, _to_ndim
+    from instanseg.utils.pytorch_utils import torch_fastremap, match_labels, _to_ndim, calc_tiles_map, remap_values_safe
 
     canvas = torch.zeros(final_shape, dtype=torch.int32, device = tiles[0].device)
 
     running_max = 0
+
+    new_map_list = []
             
     for i, window_i in enumerate(chop_list[0]):
         for j, window_j in enumerate(chop_list[1]):
 
-            edge_window = False
-            new_tile = tiles[i * len(chop_list[1]) + j]
-
-            new_tile = _to_ndim(new_tile, 3)
-
+            tile_org = tiles[i * len(chop_list[1]) + j]
+            new_tile = _to_ndim(tile_org, 3)
 
             ignore_list = []
             if i == 0:
@@ -106,61 +108,83 @@ def _stitch(tiles: list, shape: tuple, chop_list: list, final_shape: tuple, offs
                 ignore_list.append("right")
 
             if i == len(chop_list[0])-1 and j == len(chop_list[1])-1:
-                edge_window = True
                 tile1 = canvas[..., window_i + offset:window_i + shape[0], window_j + offset:window_j + shape[1]]
                 tile2 = _remove_edge_labels(new_tile[:,offset:shape[0],offset: shape[1]], ignore = ignore_list)
 
             elif i == len(chop_list[0])-1:
-                edge_window = True
                 tile1 = canvas[..., window_i + offset:window_i + shape[0], window_j + offset:window_j + shape[1]]
-                tile2 = _remove_edge_labels(new_tile[:,offset:shape[0],offset : shape[1]], ignore =ignore_list)
+                tile2 = _remove_edge_labels(new_tile[:,offset:shape[0],offset : shape[1]], ignore = ignore_list)
 
             elif j == len(chop_list[1])-1:
-                edge_window = True
                 tile1 = canvas[..., window_i + offset:window_i + shape[0], window_j + offset:window_j + shape[1]]
                 tile2 = _remove_edge_labels(new_tile[:,offset:shape[0],offset: shape[1]], ignore = ignore_list)
 
             if i == 0 and j == 0:
-                edge_window = True
                 tile1 = canvas[..., window_i  :window_i + shape[0], window_j :window_j + shape[1]]
                 tile2 = _remove_edge_labels(new_tile[:, :shape[0], : shape[1]], ignore = ignore_list)
+            
             elif i == 0:
-                edge_window = True
                 tile1 = canvas[..., window_i  :window_i + shape[0], window_j + offset :window_j + shape[1]]
                 tile2 = _remove_edge_labels(new_tile[:, :shape[0],offset : shape[1]], ignore = ignore_list)
 
             elif j == 0:
-                edge_window = True
                 tile1 = canvas[..., window_i  + offset:window_i + shape[0], window_j:window_j + shape[1]]
                 tile2 = _remove_edge_labels(new_tile[:,offset :shape[0],: shape[1]], ignore = ignore_list)
-
-            if edge_window:
-
-                tile2 = torch_fastremap(tile2)
-                tile2[tile2>0] = tile2[tile2>0] + running_max
-
-                remapped = match_labels(tile1, tile2, threshold = 0.1)[1]
-                tile1[remapped>0] = remapped[remapped>0].int()
-
-                running_max = max(running_max, tile1.max())
-
-            else:
-                
+            
+            if len(ignore_list) == 0:
                 tile1 = canvas[..., window_i + offset:window_i + shape[0] - offset, window_j + offset:window_j + shape[1] - offset]
                 tile2 = _remove_edge_labels(new_tile[:,offset:shape[0] -offset,offset: shape[1]-offset])
 
+            if map_list:
 
+                mapping = map_list[i * len(chop_list[1]) + j]
+                remapped = remap_values_safe(mapping, tile2)
+
+                tile1[remapped>0] = remapped[remapped>0].int()
+
+            else: 
+
+                tile2_pre = tile2.detach().clone()
                 tile2 = torch_fastremap(tile2)
                 tile2[tile2>0] = tile2[tile2>0] + running_max
 
                 remapped = match_labels(tile1, tile2, threshold = 0.1)[1]
+
                 tile1[remapped>0] = remapped[remapped>0].int()
-
                 running_max = max(running_max, tile1.max())
-            
 
-    return canvas
+                # remember mapping for this tile
+                map_tensor = calc_tiles_map(tile_org, tile2_pre, tile1)
+                new_map_list.append(map_tensor)
 
+    return canvas, new_map_list
+
+
+def _stitch_mean(tiles: list, shape: tuple, chop_list: list, final_shape: tuple):
+    from instanseg.utils.pytorch_utils import _to_ndim
+
+    canvas = torch.zeros(final_shape, dtype=torch.float32, device = tiles[0].device)
+    canvas_weights = torch.zeros(final_shape, dtype=torch.float32, device = tiles[0].device)
+
+    H, W = shape
+    y = torch.linspace(-1, 1, steps=H, device=tiles[0].device)
+    x = torch.linspace(-1, 1, steps=W, device=tiles[0].device)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+    sigma = 0.5  
+    gaussian_mask = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+    gaussian_mask = _to_ndim(gaussian_mask,canvas.ndim)
+
+    for i, window_i in enumerate(chop_list[0]):
+        for j, window_j in enumerate(chop_list[1]):
+            tile = tiles[i * len(chop_list[1]) + j]
+
+            weighted_tile = tile * gaussian_mask 
+            canvas[..., window_i:window_i+H, window_j:window_j+W] += weighted_tile
+            canvas_weights[..., window_i:window_i+H, window_j:window_j+W] += gaussian_mask
+
+    canvas_mean = canvas / (canvas_weights + 1e-8)  # avoid divide by zero
+
+    return canvas_mean
 
 def _zarr_to_json_export(path_to_zarr, detection_size = 30, size = 1024, scale = 1, n_dim = 1):
 
@@ -275,8 +299,8 @@ def _instanseg_padding(img: torch.Tensor, extra_pad: int = 0, min_dim: int = 16,
 
     if ensure_square and not is_square:
         pady = pady + bigger_dim - original_shape[-1]
-        padx = padx + bigger_dim - img.shape[-2]
-        print(padx, pady)
+        padx = padx + bigger_dim - original_shape[-2]
+       # print(padx, pady)
     
 
     return img, torch.stack((padx, pady))
@@ -304,7 +328,7 @@ def _recover_padding(x: torch.Tensor, pad: torch.Tensor):
 def _sliding_window_inference(input_tensor, 
                              predictor, 
                              window_size=(512, 512), 
-                             overlap = 80, 
+                             overlap = 80,
                              max_cell_size = 20, 
                              sw_device='cuda',
                              device='cpu', 
@@ -313,6 +337,11 @@ def _sliding_window_inference(input_tensor,
                              batch_size = 1,
                              instanseg_kwargs = None):
     
+
+    if 2 * (overlap + max_cell_size) >= min(input_tensor.shape[-2:]):
+        overlap = 0
+        max_cell_size = 0
+
     h,w = input_tensor.shape[-2:]
     window_size = (min(window_size[0], h), min(window_size[1], w))
     
@@ -324,25 +353,39 @@ def _sliding_window_inference(input_tensor,
 
  
     assert len(tile_list) > 0, "No tiles generated"
-    # print("Number of tiles: ", len(tile_list))
-  #  print("Shape of tiles: ", tile_list[0].shape)
-    # print("window size: ", window_size)
-    # print("input tensor shape: ", input_tensor.shape)
- 
+
     with torch.no_grad():
         with torch.amp.autocast("cuda"):
             batch_list = [torch.stack(tile_list[batch_size * i:batch_size * (i+1)]) for i in range(int(np.ceil(len(tile_list)/batch_size)))]
             label_list = torch.cat([predictor(tile.to(sw_device),**instanseg_kwargs).to(device) for tile in tqdm(batch_list, disable= not show_progress,leave = False, colour = "blue")])
  
+    if output_channels == 1: 
    
-    lab = torch.cat([_stitch([lab[i] for lab in label_list],
-                            shape=window_size,
-                            chop_list=tuple_index,
-                            offset = overlap,
-                            final_shape=(1, input_tensor.shape[1], input_tensor.shape[2])) 
+        lab, _ = _stitch([lab[0] for lab in label_list],
+                                shape=window_size,
+                                chop_list=tuple_index,
+                                offset = overlap,
+                                final_shape=(1, input_tensor.shape[1], input_tensor.shape[2])) 
+    
+    elif output_channels == 2:
+
+        lab, map_list = _stitch([lab[1] for lab in label_list],
+                        shape=window_size,
+                        chop_list=tuple_index,
+                        offset = overlap,
+                        final_shape=(1, input_tensor.shape[1], input_tensor.shape[2])) 
  
-                    for i in range(output_channels)], dim=0)
- 
- 
+        lab_nuc, _ = _stitch([lab[0] for lab in label_list],
+                                shape=window_size,
+                                chop_list=tuple_index,
+                                offset = overlap,
+                                final_shape=(1, input_tensor.shape[1], input_tensor.shape[2]),
+                                map_list = map_list) 
+    
+        lab = torch.cat([lab_nuc, lab], dim=0)
+
+    else:
+        raise ValueError(f'Unsupported number of output channels: {output_channels}.')
+
     return lab[None]  # 1,C,H,W
 
