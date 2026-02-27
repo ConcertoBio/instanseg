@@ -17,6 +17,7 @@ Steps to run:
 """
 
 import argparse
+import gc
 import os
 import time
 
@@ -92,6 +93,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     with ProgressBar():
         full_mtg = np.asarray(full_mtg_darr)
     log_mem('after full_mtg')
+    del full_mtg_darr
 
     summed_dyes = steps.sum_dyes(
         jmd=md,
@@ -107,15 +109,13 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         else full_mtg[-1]
     )
     log_mem('after bf_norm')
-    stacked = np.asarray(
-        np.stack(
-            [
-                summed_dyes,
-                bf_norm,
-            ],
-            axis=0,
-        )
-    )
+    stacked = np.stack(
+        [
+            summed_dyes,
+            bf_norm,
+        ],
+        axis=0,
+    ).astype(np.float32, copy=False)
     del full_mtg
     del summed_dyes
     del bf_norm
@@ -123,6 +123,13 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     print(f'{stacked.shape=}')
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object, image_reader='skimage.io')
+    del torchscript_object
+    del chip
+    del mtg_sat_lims
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    log_mem('after gc before eval_medium_image')
     log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
