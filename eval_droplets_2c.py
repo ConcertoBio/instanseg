@@ -122,7 +122,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     log_mem('after stacked')
     print(f'{stacked.shape=}')
     torchscript_object = torch.jit.load(model_path)
-    model = InstanSeg(torchscript_object)
+    model = InstanSeg(torchscript_object, image_reader='skimage.io')
     log_mem('before eval_medium_image')
     instances = model.eval_medium_image(
         image=stacked,  # type: ignore
