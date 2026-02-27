@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from dask.array import core as dask_core
 from dask.diagnostics.progress import ProgressBar
+from skimage import transform
 from tabs import CONDUCTOR_ENV
 from tabs.img_utils import transformations
 from tabs.io import file_io
@@ -109,10 +110,12 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         else full_mtg[-1]
     )
     log_mem('after bf_norm')
+    downsampling = 2 if md.run_magnification == 4 else 1
+    mtg_yx_shape = bf_norm.shape
     stacked = np.stack(
         [
-            summed_dyes,
-            bf_norm,
+            summed_dyes[::downsampling, ::downsampling],
+            bf_norm[::downsampling, ::downsampling],
         ],
         axis=0,
     ).astype(np.float32, copy=False)
@@ -120,7 +123,7 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
     del summed_dyes
     del bf_norm
     log_mem('after stacked')
-    print(f'{stacked.shape=}')
+    gc.collect()
     torchscript_object = torch.jit.load(model_path)
     model = InstanSeg(torchscript_object, image_reader='skimage.io')
     del torchscript_object
@@ -140,7 +143,19 @@ def run(job_id: int, env: CONDUCTOR_ENV, model_path: str):
         normalise=False,
     )
     log_mem('after eval_medium_image')
+    gc.collect()
     instances = np.squeeze(np.asarray(instances))
+    if instances.shape != mtg_yx_shape:
+        instances_dtype = instances.dtype
+        instances = np.asarray(
+            transform.resize(
+                image=instances,
+                output_shape=mtg_yx_shape,
+                preserve_range=True,
+                order=0,
+                anti_aliasing=False,
+            ),
+        ).astype(instances_dtype, copy=False)
     log_mem('after instances squeeze')
     save_path = md.tmd.build_arranger_asset_filepath(
         asset_suffix='99_instanseg_nuclei_predictions.zarr'
